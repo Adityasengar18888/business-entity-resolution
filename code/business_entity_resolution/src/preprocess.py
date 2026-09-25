@@ -16,6 +16,12 @@ from typing import Optional, Dict, Tuple
 from tqdm import tqdm
 
 try:
+    from indic_transliteration import sanscript
+    from indic_transliteration.sanscript import transliterate
+except ImportError:
+    sanscript = None
+
+try:
     from unidecode import unidecode
 except ImportError:
     # Fallback: strip non-ASCII entirely
@@ -42,7 +48,7 @@ def load_source(filepath: str) -> pd.DataFrame:
     df = pd.read_csv(
         filepath,
         sep="\t",
-        dtype={"entity_id": str, "business_name": str, "business_address": str, "country": str},
+        dtype={"entity_id": str, "business_name": "string", "business_address": "string", "country": "category"},
         encoding="utf-8",
         na_values=["", "nan", "null", "None", "NaN"],
         keep_default_na=True,
@@ -156,9 +162,18 @@ def transliterate_to_latin(text: str) -> str:
         "राम मार्केटिंग" → "ram marketimg"
         "ராஜ் இன்வெஸ்ட்மெண்ட்ஸ்" → "raj investmentss"
     """
-    # Check if text contains any non-Latin characters
     if any(ord(c) > 127 for c in text):
-        return unidecode(text)
+        res = text
+        if sanscript:
+            try:
+                # Try Indic transliteration for supported scripts
+                res = transliterate(res, sanscript.DEVANAGARI, sanscript.ITRANS)
+                res = transliterate(res, sanscript.TAMIL, sanscript.ITRANS)
+                res = transliterate(res, sanscript.KANNADA, sanscript.ITRANS)
+            except:
+                pass
+        # Unidecode handles any remaining non-ASCII (e.g. French accents, or other scripts)
+        return unidecode(res)
     return text
 
 
@@ -281,35 +296,27 @@ def extract_zip_pin(address: str, country: str = "") -> str:
     Returns:
         ZIP/PIN code string, or '' if not found
     """
-    if not address:
+    if not address or pd.isna(address):
         return ""
     
     country_lower = country.lower().strip()
     
-    if country_lower == "india":
-        # Indian PIN: 6 digits, typically at end of address or after city/state
-        # Avoid matching street/door numbers by skipping leading digits
-        matches = list(PIN_PATTERN.finditer(address))
-        # Prefer the last 6-digit number (most likely to be PIN)
+    if country_lower == "us":
+        # US ZIP: 5 digits, optionally followed by -4 digits
+        matches = re.findall(r'\b(\d{5})(?:-\d{4})?\b', address)
+        # Prefer the last match (ZIPs typically at end)
+        return matches[-1] if matches else ""
+    elif country_lower == "india":
+        # India PIN: 6 digits, not first token
+        matches = re.findall(r'\b(\d{6})\b', address)
         if matches:
-            # Skip if it's the very first token (likely a door/plot number)
-            last_match = matches[-1]
-            if last_match.start() > 0:
-                return last_match.group(1)
-            elif len(matches) > 1:
-                return matches[-1].group(1)
-    elif country_lower in ("us", "france"):
-        # US ZIP / France postal: 5 digits, typically at end of address
-        # Search from the END of the address to avoid street numbers
-        matches = list(ZIP_PATTERN.finditer(address))
-        if matches:
-            # Prefer the last 5-digit match (most likely ZIP)
-            last_match = matches[-1]
-            # Validate: don't pick it if it's at the very start (street number)
-            if last_match.start() > 5:
-                return last_match.group(1)
-            elif len(matches) > 1:
-                return matches[1].group(1)
+            if len(matches) == 1 and address.strip().startswith(matches[0]):
+                return "" # Probably a door number
+            return matches[-1]
+    elif country_lower == "france":
+        # France: 5 digits, typically at start
+        matches = re.findall(r'\b(\d{5})\b', address)
+        return matches[0] if matches else ""
     else:
         # Unknown country — try PIN first (6 digits), then ZIP (5 digits)
         matches_pin = list(PIN_PATTERN.finditer(address))
@@ -399,6 +406,10 @@ def preprocess_dataframe(df: pd.DataFrame, desc: str = "") -> pd.DataFrame:
     df["addr_tokens"] = df["business_address"].apply(
         lambda x: " ".join(extract_address_tokens(x))
     )
+    
+    # Flag columns for null values
+    df["has_name"] = df["business_name"].ne("")
+    df["has_address"] = df["business_address"].ne("")
     
     # Summary stats
     zip_found = (df["zip_pin"] != "").sum()

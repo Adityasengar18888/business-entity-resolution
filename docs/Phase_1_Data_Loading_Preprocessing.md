@@ -102,7 +102,7 @@ Build a robust preprocessing pipeline that normalizes noisy business records fro
 pd.read_csv(
     filepath,
     sep="\t",                    # Tab-separated (addresses contain commas)
-    dtype={"entity_id": str, ...},  # Keep IDs as strings
+    dtype={"entity_id": str, "business_name": "string", "business_address": "string", "country": "category"},
     encoding="utf-8",            # Handle multi-script text
     na_values=["", "nan", "null", "None", "NaN"],
     keep_default_na=True,
@@ -111,6 +111,7 @@ pd.read_csv(
 
 **Why these choices:**
 - `sep="\t"`: Mandatory — addresses and ID lists contain commas, so CSV parsing would break
+- **Memory-efficient dtypes**: `string` (PyArrow backed in pandas >= 2.0) and `category` significantly reduce memory footprint for ~12.5M records
 - `dtype=str`: Entity IDs like `S1-965667` must not be parsed as integers
 - `encoding="utf-8"`: Required for Hindi (Devanagari), Tamil, Kannada scripts
 - NaN values are filled with empty strings `""` for safe string operations downstream
@@ -231,16 +232,20 @@ Raw Address
 
 ### 4.4 Transliteration Strategy
 
-We use the `unidecode` library to transliterate non-Latin scripts:
+We use `indic-transliteration` for accurate conversion of Indian scripts (Devanagari, Tamil, Kannada) and fallback to `unidecode` for French accents:
 
 | Script | Input | Output |
 |--------|-------|--------|
-| Hindi (Devanagari) | राम मार्केटिंग | raam maarkettiNg |
-| Tamil | ராஜ் இன்வெஸ்ட்மெண்ட்ஸ் | raaj innnvesttmenntts |
-| Kannada | ಕರ್ನಾಟಕ | krnaattk |
+| Hindi (Devanagari) | राम मार्केटिंग | rAma mArkeTiMga |
+| Tamil | ராஜ் இன்வெஸ்ட்மெண்ட்ஸ் | rAj innnvesDhmeNDhs |
+| Kannada | ಕರ್ನಾಟಕ | karnATaka |
 | French accented | Énterprises | Enterprises |
 
-**Limitation:** Transliteration is approximate — it maps characters phonetically, but may not match the canonical English spelling. For example, `एसएस` (Hindi for "SS") transliterates to `eses`, not `ss`. This is acceptable because:
+**Methodology:**
+1. Use `indic_transliteration` with `sanscript.ITRANS` for supported scripts
+2. Any remaining non-ASCII characters are handled via `unidecode`
+
+**Limitation:** Transliteration is approximate — it maps characters phonetically. This is acceptable because:
 1. Both S1 (English) and S2/S3 (Hindi) records go through the same pipeline
 2. The ML model in Phase 4 will learn to match across these variations using similarity features
 3. For blocking, we use multiple keys so transliteration quality doesn't solely determine recall
@@ -255,9 +260,9 @@ Position-aware extraction to avoid false-matching street numbers:
 
 | Country | Pattern | Position Rule | Example |
 |---------|---------|--------------|---------|
-| US | `\b(\d{5})(?:-\d{4})?\b` | Must be >5 chars into string | `NC 27265` → `27265` |
+| US | `\b(\d{5})(?:-\d{4})?\b` | Prefer last match | `NC 27265` → `27265` |
 | India | `\b(\d{6})\b` | Must not be first token | `CHENNAI 600004` → `600004` |
-| France | `\b(\d{5})\b` | Must be >5 chars into string | `75008 Paris` → `75008` |
+| France | `\b(\d{5})\b` | Typically at start | `75008 Paris` → `75008` |
 
 **False-positive prevention:**
 ```
@@ -300,7 +305,8 @@ First 5 characters of the blocking-key name, for cheap prefix-based blocking:
 | `zip_pin` | Extracted ZIP/PIN code | `"28655"` |
 | `name_prefix` | First 5 chars of name_key | `"payne"` |
 | `addr_tokens` | Significant address tokens (space-joined) | `"fremont street peoria illinois"` |
-
+| `has_name` | Boolean flag indicating if name is present | `True` |
+| `has_address` | Boolean flag indicating if address is present | `True` |
 ### 6.2 Ground Truth Utilities
 
 Two utility functions for downstream use:
